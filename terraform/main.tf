@@ -73,12 +73,16 @@ resource "aws_iam_role_policy" "lambda_bedrock" {
         }
       },
       {
-        Sid    = "AccessOpenSearch"
-        Effect = "Allow"
-        Action = [
-          "aoss:APIAccessAll"
-        ]
+        Sid      = "AccessOpenSearch"
+        Effect   = "Allow"
+        Action   = ["aoss:APIAccessAll"]
         Resource = "*"
+      },
+      {
+        Sid      = "ReadCoursesTable"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
+        Resource = aws_dynamodb_table.courses.arn
       }
     ]
   })
@@ -94,8 +98,9 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
 
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_file = "${path.module}/../backend/lambda/chat.py"
-  output_path = "${path.module}/../backend/lambda/chat.zip"
+  source_dir  = "${path.module}/../backend/lambda"
+  output_path = "${path.module}/../backend/lambda_deployment.zip"
+  excludes    = ["chat.zip", "__pycache__"]
 }
 
 # Lambda function
@@ -107,6 +112,13 @@ resource "aws_lambda_function" "chat" {
   handler          = "chat.handler"
   runtime          = "python3.11"
   timeout          = 30
+  memory_size      = 256
+ 
+  environment {
+    variables = {
+      OPENSEARCH_ENDPOINT = aws_opensearchserverless_collection.knowledge_base.collection_endpoint
+    }
+  }
 }
 
 resource "aws_apigatewayv2_api" "chatbot" {
@@ -148,3 +160,116 @@ resource "aws_lambda_permission" "apigw" {
 output "api_url" {
   value = aws_apigatewayv2_stage.default.invoke_url
 }
+
+# OpenSearch Serverless collection for RAG
+
+resource "aws_opensearchserverless_security_policy" "encryption" {
+
+  name = "umd-chatbot-encryption"
+
+  type = "encryption"
+
+  policy = jsonencode({
+
+    Rules = [{
+
+      ResourceType = "collection"
+
+      Resource     = ["collection/umd-chatbot-knowledge"]
+
+    }]
+
+    AWSOwnedKey = true
+
+  })
+
+}
+ 
+resource "aws_opensearchserverless_security_policy" "network" {
+
+  name = "umd-chatbot-network"
+
+  type = "network"
+
+  policy = jsonencode([{
+
+    Rules = [{
+
+      ResourceType = "collection"
+
+      Resource     = ["collection/umd-chatbot-knowledge"]
+
+    }]
+
+    AllowFromPublic = true
+
+  }])
+
+}
+ 
+resource "aws_opensearchserverless_access_policy" "data_access" {
+  name = "umd-chatbot-access"
+  type = "data"
+  policy = jsonencode([{
+    Rules = [{
+      ResourceType = "collection"
+      Resource     = ["collection/umd-chatbot-knowledge"]
+      Permission   = ["aoss:*"]
+    }, {
+      ResourceType = "index"
+      Resource     = ["index/umd-chatbot-knowledge/*"]
+      Permission   = ["aoss:*"]
+    }]
+    Principal = [
+      aws_iam_role.lambda_exec.arn,
+      "arn:aws:iam::301394199680:user/jaden-admin"
+    ]
+  }])
+}
+ 
+resource "aws_opensearchserverless_collection" "knowledge_base" {
+
+  name = "umd-chatbot-knowledge"
+
+  type = "VECTORSEARCH"
+ 
+  depends_on = [
+
+    aws_opensearchserverless_security_policy.encryption,
+
+    aws_opensearchserverless_security_policy.network,
+
+    aws_opensearchserverless_access_policy.data_access
+
+  ]
+
+}
+ 
+output "opensearch_endpoint" {
+
+  value = aws_opensearchserverless_collection.knowledge_base.collection_endpoint
+
+}
+ 
+
+# DynamoDB table for structured course data
+resource "aws_dynamodb_table" "courses" {
+  name         = "umd-chatbot-courses"
+  billing_mode = "PAY_PER_REQUEST"  # No idle cost, pay per query
+  hash_key     = "course_id"
+ 
+  attribute {
+    name = "course_id"
+    type = "S"
+  }
+ 
+  # Tag for easy identification
+  tags = {
+    Project = "umd-chatbot"
+  }
+}
+ 
+output "courses_table_name" {
+  value = aws_dynamodb_table.courses.name
+}
+
