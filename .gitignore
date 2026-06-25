@@ -1,18 +1,29 @@
-# Terraform
-*.tfstate
-*.tfstate.backup
-.terraform/
-*.tfvars
+# Lambda deployment artifacts (libraries installed via pip --target)
+backend/lambda/*/
+backend/lambda/*.dist-info/
+backend/lambda/*.zip
+backend/lambda_deployment.zip
+backend/lambda/*.so
  
-# Python
+# Keep the actual Lambda code tracked
+!backend/lambda/chat.py
+ 
+# Terraform state and cache
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfplan
+ 
+# Python cache
 __pycache__/
 *.pyc
+ 
+# AWS credentials (just in case)
 .env
-venv/
- 
-# Node
-node_modules/
- 
-# AWS
 *.pem
-.aws-credentials
+.aws/
+ 
+# OS junk
+.DS_Store
+Thumbs.db
