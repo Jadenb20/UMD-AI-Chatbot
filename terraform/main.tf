@@ -147,6 +147,11 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.chatbot.id
   name        = "$default"
   auto_deploy = true
+ 
+  default_route_settings {
+    throttling_rate_limit  = 1   # ~1 req/sec sustained
+    throttling_burst_limit = 5   # allows brief bursts up to 5
+  }
 }
 
 resource "aws_lambda_permission" "apigw" {

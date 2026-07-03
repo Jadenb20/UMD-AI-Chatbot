@@ -15,7 +15,7 @@ INDEX_NAME = 'umd-knowledge'
 COURSES_TABLE = 'umd-chatbot-courses'
 PLANETTERP_BASE = 'https://api.planetterp.com/v1'
 TOP_K = 3
-MAX_PROFS_TO_ENRICH = 8  # Cap to keep latency sane
+MAX_PROFS_TO_ENRICH = 20
  
 # AWS clients
 bedrock = boto3.client('bedrock-runtime', region_name=REGION)
@@ -43,19 +43,36 @@ opensearch = OpenSearch(
  
  
 # ───────────────────────────────────────────────────────────
-# INTENT CLASSIFICATION
+# INTENT CLASSIFICATION (history-aware, sharper parsing)
 # ───────────────────────────────────────────────────────────
  
-def classify_intent(question):
-    """Ask Claude to classify the question's intent."""
+def classify_intent(question, history=None):
+    """Ask Claude to classify the question's intent, using recent conversation context."""
+ 
+    context_blurb = ""
+    if history:
+        recent = history[-4:] if len(history) > 4 else history
+        context_blurb = "Recent conversation:\n"
+        for msg in recent:
+            role = msg.get('role', '')
+            content = msg.get('content', '')[:200]
+            context_blurb += f"{role}: {content}\n"
+        context_blurb += "\n"
+ 
     classification_prompt = (
-        "Classify the following question into ONE category. Respond with ONLY the category name, nothing else.\n\n"
-        "Categories:\n"
-        "- course_search: Looking for courses matching criteria (e.g., 'humanities classes at 11:15', '3-credit math courses', 'easy DSHU classes')\n"
-        "- course_info: Asking about a specific course code (e.g., 'what does CMSC131 cover?', 'tell me about ENGL101')\n"
-        "- professor_info: Asking about a specific professor (e.g., 'is Dr. Smith good?', 'what's Mount's rating?')\n"
-        "- general: Anything else about UMD (admissions, dining, campus life, applying, majors overview)\n\n"
-        f"Question: {question}\n\n"
+        "Classify the following question into ONE category. Reply with ONLY the category name — no other words, no explanation.\n\n"
+        "IMPORTANT RULES:\n"
+        "- If a specific course code appears (like CMSC131, ENGL101), OR the question refers to a course from recent conversation, classify as course_info.\n"
+        "- 'Who teaches X', 'who has the highest rating', 'best professor for X', 'which prof is easiest' — these are course_info when a course context exists.\n"
+        "- Only use professor_info when the question is about ONE named professor and NOT comparing across a course.\n"
+        "- If the question refers to a professor already mentioned in recent conversation (using 'her', 'him', 'they', 'their class'), classify as professor_info.\n\n"
+        "Valid category names (choose exactly one):\n"
+        "course_search — filtering courses by criteria (times, gen-eds, credits) with no specific course code\n"
+        "course_info — about a specific course code OR ranking/comparing profs of a course\n"
+        "professor_info — about ONE named professor (or pronoun referring to one)\n"
+        "general — anything else about UMD (admissions, dining, campus life)\n\n"
+        f"{context_blurb}"
+        f"Current question: {question}\n\n"
         "Category:"
     )
  
@@ -71,12 +88,23 @@ def classify_intent(question):
     result = json.loads(response['body'].read())
     raw = result['content'][0]['text'].strip().lower()
  
-    if 'course_search' in raw:
+    # Extract just the category name — grab the first whitespace-delimited token
+    # This handles cases where Claude adds explanations after the category
+    first_token = raw.split()[0].strip('.,;:') if raw.split() else ''
+ 
+    if first_token == 'course_search' or first_token.startswith('course_search'):
         return 'course_search'
-    if 'course_info' in raw:
+    if first_token == 'course_info' or first_token.startswith('course_info'):
         return 'course_info'
-    if 'professor_info' in raw:
+    if first_token == 'professor_info' or first_token.startswith('professor_info'):
         return 'professor_info'
+    if first_token == 'general':
+        return 'general'
+ 
+    # Fallback: check whole response for any category as a whole word
+    for category in ['course_search', 'course_info', 'professor_info']:
+        if re.search(rf'\b{category}\b', raw):
+            return category
     return 'general'
  
  
@@ -104,11 +132,11 @@ def search_opensearch(question):
  
  
 # ───────────────────────────────────────────────────────────
-# PLANETTERP API
+# PLANETTERP API (with name-variant fallback)
 # ───────────────────────────────────────────────────────────
  
-def fetch_planetterp_professor(name):
-    """Get prof info: rating, type, courses taught."""
+def _try_planetterp_professor(name):
+    """One-shot lookup, returns None on 404 or error."""
     try:
         response = requests.get(
             f'{PLANETTERP_BASE}/professor',
@@ -123,14 +151,43 @@ def fetch_planetterp_professor(name):
         return None
  
  
+def fetch_planetterp_professor(name):
+    """Try name variants to work around middle name / initial mismatches."""
+    if not name:
+        return None
+ 
+    # Try the name as-is first
+    data = _try_planetterp_professor(name)
+    if data:
+        return data
+ 
+    # Try common variants
+    parts = name.split()
+    variants = []
+ 
+    if len(parts) >= 2:
+        # Just first + last (drop middle names/initials)
+        variants.append(f"{parts[0]} {parts[-1]}")
+        # Last, First (some listings use this)
+        variants.append(f"{parts[-1]}, {parts[0]}")
+ 
+    for variant in variants:
+        if variant == name:
+            continue
+        data = _try_planetterp_professor(variant)
+        if data:
+            print(f"Found {name} via variant: {variant}")
+            return data
+ 
+    return None
+ 
+ 
 def fetch_planetterp_grades(professor_name, course_id):
-    """Get grade distribution for a prof+course combo."""
     try:
-        response = requests.get(
-            f'{PLANETTERP_BASE}/grades',
-            params={'professor': professor_name, 'course': course_id},
-            timeout=5
-        )
+        params = {'professor': professor_name}
+        if course_id:
+            params['course'] = course_id
+        response = requests.get(f'{PLANETTERP_BASE}/grades', params=params, timeout=5)
         if response.status_code == 200:
             return response.json()
         return None
@@ -160,22 +217,23 @@ def calculate_pass_rate(grade_records):
     return round((passing_students / total_students) * 100, 1)
  
  
-def enrich_courses_with_professor_data(courses):
+def enrich_courses_with_professor_data(courses, cap=MAX_PROFS_TO_ENRICH):
     """For each course, look up its instructors on PlanetTerp in parallel."""
-    # Collect unique prof+course pairs to fetch
     lookups = []
+    seen = set()
     for course in courses:
         course_id = course.get('course_id')
-        for section in course.get('sections', [])[:2]:  # First 2 sections only
-            for instructor in section.get('instructors', [])[:1]:  # Primary instructor
-                lookups.append((instructor, course_id))
+        for section in course.get('sections', []):
+            for instructor in section.get('instructors', []):
+                key = (instructor, course_id)
+                if key not in seen:
+                    seen.add(key)
+                    lookups.append(key)
  
-    # Cap to keep total latency reasonable
-    lookups = lookups[:MAX_PROFS_TO_ENRICH]
+    lookups = lookups[:cap]
  
-    # Parallel fetch
     enrichments = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         prof_futures = {
             executor.submit(fetch_planetterp_professor, prof): (prof, course_id)
             for prof, course_id in lookups
@@ -206,7 +264,7 @@ def enrich_courses_with_professor_data(courses):
  
  
 # ───────────────────────────────────────────────────────────
-# DYNAMODB (structured course search)
+# EXTRACTION HELPERS
 # ───────────────────────────────────────────────────────────
  
 GEN_ED_MAP = {
@@ -228,7 +286,8 @@ GEN_ED_MAP = {
  
  
 def extract_course_codes(question):
-    return re.findall(r'\b([A-Z]{3,4}\d{3}[A-Z]?)\b', question.upper())
+    """Extract course codes like CMSC131, ENGL101, PHIL220 — case-insensitive."""
+    return re.findall(r'\b([A-Za-z]{3,4}\d{3}[A-Za-z]?)\b', question.upper())
  
  
 def extract_gen_eds(question):
@@ -237,7 +296,13 @@ def extract_gen_eds(question):
  
  
 def extract_time(question):
-    return re.findall(r'\b(\d{1,2}:\d{2})\b', question)
+    """Extract time filters like '11:15', '11am', '11 am', '2:30pm'."""
+    times = []
+    times.extend(re.findall(r'\b(\d{1,2}:\d{2})\b', question))
+    for match in re.finditer(r'\b(\d{1,2})\s*(am|pm)\b', question.lower()):
+        hour = match.group(1)
+        times.append(f"{hour}:00{match.group(2)}")
+    return times
  
  
 def extract_credits(question):
@@ -245,11 +310,40 @@ def extract_credits(question):
     return match.group(1) if match else None
  
  
+def find_professor_name_in_history(history):
+    """Scan recent messages backwards for a two-word capitalized name."""
+    if not history:
+        return None
+    for msg in reversed(history):
+        content = msg.get('content', '')
+        # Look for "First Last" pattern (two capitalized words)
+        match = re.search(r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b', content)
+        if match:
+            return match.group(1)
+    return None
+ 
+ 
+def find_course_code_in_history(history):
+    """Scan recent messages backwards for a course code — case-insensitive."""
+    if not history:
+        return None
+    for msg in reversed(history):
+        content = msg.get('content', '')
+        match = re.search(r'\b([A-Za-z]{3,4}\d{3}[A-Za-z]?)\b', content)
+        if match:
+            return match.group(1).upper()
+    return None
+ 
+ 
+# ───────────────────────────────────────────────────────────
+# DYNAMODB (structured course search)
+# ───────────────────────────────────────────────────────────
+ 
 def query_courses_by_code(codes):
     results = []
     for code in codes:
         try:
-            response = courses_table.get_item(Key={'course_id': code})
+            response = courses_table.get_item(Key={'course_id': code.upper()})
             if 'Item' in response:
                 results.append(response['Item'])
         except Exception as e:
@@ -298,18 +392,16 @@ def query_courses_by_filters(gen_eds, time_filter, credit_filter):
  
  
 def format_courses_for_prompt(courses, enrichments=None):
-    """Compact, readable representation for Claude with optional prof enrichment."""
     if not courses:
         return ""
     lines = []
     for c in courses:
         course_id = c.get('course_id')
         section_info = []
-        for s in c.get('sections', [])[:2]:
+        for s in c.get('sections', []):
             instructors = s.get('instructors', [])
             instructor_str = ', '.join(instructors)
  
-            # Add PlanetTerp data if available
             prof_extras = []
             if enrichments and instructors:
                 key = (instructors[0], course_id)
@@ -317,8 +409,12 @@ def format_courses_for_prompt(courses, enrichments=None):
                     e = enrichments[key]
                     if e.get('rating'):
                         prof_extras.append(f"PT rating: {e['rating']:.2f}/5")
-                    if e.get('pass_rate'):
+                    else:
+                        prof_extras.append("no rating on PlanetTerp")
+                    if e.get('pass_rate') is not None:
                         prof_extras.append(f"pass rate: {e['pass_rate']}%")
+                else:
+                    prof_extras.append("no PlanetTerp data")
  
             extras_str = f" [{'; '.join(prof_extras)}]" if prof_extras else ""
  
@@ -337,6 +433,16 @@ def format_courses_for_prompt(courses, enrichments=None):
     return '\n\n'.join(lines)
  
  
+PROF_QUALITY_KEYWORDS = [
+    'pass', 'easy', 'hard', 'good', 'best', 'teacher', 'professor',
+    'rating', 'highest', 'lowest', 'which', 'recommend', 'chance', 'compare'
+]
+ 
+ 
+def wants_prof_data(question):
+    return any(k in question.lower() for k in PROF_QUALITY_KEYWORDS)
+ 
+ 
 # ───────────────────────────────────────────────────────────
 # MAIN HANDLER
 # ───────────────────────────────────────────────────────────
@@ -344,6 +450,7 @@ def format_courses_for_prompt(courses, enrichments=None):
 def handler(event, context):
     body = json.loads(event.get('body', '{}'))
     user_message = body.get('message', '')
+    history = body.get('history', [])
  
     if len(user_message) > 200:
         return {
@@ -356,7 +463,7 @@ def handler(event, context):
             'body': json.dumps({'error': 'No message provided'})
         }
  
-    intent = classify_intent(user_message)
+    intent = classify_intent(user_message, history)
     print(f"Intent classified as: {intent}")
  
     context_text = ""
@@ -369,12 +476,7 @@ def handler(event, context):
         credits = extract_credits(user_message)
         courses = query_courses_by_filters(gen_eds, times, credits)
         if courses:
-            # Enrich with PlanetTerp data if the user asked about profs/passing
-            wants_prof_data = any(
-                k in user_message.lower()
-                for k in ['pass', 'easy', 'hard', 'good', 'best', 'teacher', 'professor', 'rating']
-            )
-            if wants_prof_data:
+            if wants_prof_data(user_message):
                 print("Enriching with PlanetTerp data...")
                 enrichments = enrich_courses_with_professor_data(courses)
             context_text = "Matching courses from UMD catalog:\n\n" + format_courses_for_prompt(courses, enrichments)
@@ -382,26 +484,54 @@ def handler(event, context):
  
     elif intent == 'course_info':
         codes = extract_course_codes(user_message)
+        # Fallback: check conversation history
+        if not codes:
+            historical_code = find_course_code_in_history(history)
+            if historical_code:
+                codes = [historical_code]
+                print(f"Using course code from history: {historical_code}")
+ 
         if codes:
             courses = query_courses_by_code(codes)
             if courses:
-                context_text = "Course details from UMD catalog:\n\n" + format_courses_for_prompt(courses)
-                used_source = "dynamodb"
+                if wants_prof_data(user_message):
+                    print("Enriching course_info with PlanetTerp data...")
+                    # Higher cap for single-course lookups — we want all profs
+                    enrichments = enrich_courses_with_professor_data(courses, cap=40)
+                context_text = "Course details from UMD catalog:\n\n" + format_courses_for_prompt(courses, enrichments)
+                used_source = "dynamodb+planetterp" if enrichments else "dynamodb"
  
     elif intent == 'professor_info':
-        # Extract prof name — heuristic: capitalized words after "Dr." or quoted names
         name_match = re.search(r'(?:Dr\.|Professor)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)', user_message)
-        if not name_match:
-            # Fallback: try last capitalized word
-            words = re.findall(r'\b([A-Z][a-z]+)\b', user_message)
-            name_match_str = words[-1] if words else None
-        else:
+        if name_match:
             name_match_str = name_match.group(1)
+        else:
+            two_word = re.search(r'\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b', user_message)
+            name_match_str = two_word.group(1) if two_word else None
+ 
+        # Fallback: check history
+        if not name_match_str:
+            name_match_str = find_professor_name_in_history(history)
+            if name_match_str:
+                print(f"Using professor name from history: {name_match_str}")
  
         if name_match_str:
             prof_data = fetch_planetterp_professor(name_match_str)
             if prof_data:
-                context_text = f"Professor data from PlanetTerp:\n{json.dumps(prof_data, indent=2)}"
+                grade_records = fetch_planetterp_grades(name_match_str, None)
+                pass_rate = calculate_pass_rate(grade_records) if grade_records else None
+ 
+                summary_parts = [f"Professor: {name_match_str}"]
+                if prof_data.get('average_rating'):
+                    summary_parts.append(f"Average rating: {prof_data['average_rating']:.2f}/5")
+                if prof_data.get('type'):
+                    summary_parts.append(f"Type: {prof_data['type']}")
+                if pass_rate is not None:
+                    summary_parts.append(f"Overall pass rate (C- or higher): {pass_rate}%")
+                if prof_data.get('courses'):
+                    summary_parts.append(f"Courses taught: {', '.join(prof_data['courses'][:10])}")
+ 
+                context_text = "Professor data from PlanetTerp:\n" + "\n".join(summary_parts)
                 used_source = "planetterp"
  
     else:  # general
@@ -427,11 +557,21 @@ def handler(event, context):
     system_prompt = (
         "You are a helpful assistant for University of Maryland students. "
         "Answer the user's question using the context below. "
-        "When professor pass rates or ratings are provided, use them to inform your recommendations. "
-        "If the context doesn't contain enough information, say so honestly. "
+        "When professor pass rates, ratings, or grade data are provided, prominently cite the specific numbers and use them to make concrete recommendations. "
+        "If the user asks 'which' or 'best' or 'highest' — provide a clear ranking. "
+        "If the context shows 'no PlanetTerp data' or 'no rating on PlanetTerp' for some professors, acknowledge them but focus recommendations on those with data. "
+        "If the context doesn't contain enough information, say so honestly and briefly suggest checking PlanetTerp or Testudo. "
         "Be concise and direct.\n\n"
         f"Context:\n{context_text if context_text else '(no relevant information found)'}"
     )
+ 
+    # Build conversation history for Claude
+    conv_history = history[:]
+    while conv_history and conv_history[0].get('role') == 'assistant':
+        conv_history = conv_history[1:]
+    conv_history = conv_history[-10:] if len(conv_history) > 10 else conv_history
+ 
+    messages = conv_history + [{'role': 'user', 'content': user_message}]
  
     response = bedrock.invoke_model(
         modelId='us.anthropic.claude-sonnet-4-6',
@@ -440,7 +580,7 @@ def handler(event, context):
             'max_tokens': 1024,
             'temperature': 0.7,
             'system': system_prompt,
-            'messages': [{'role': 'user', 'content': user_message}]
+            'messages': messages
         })
     )
  

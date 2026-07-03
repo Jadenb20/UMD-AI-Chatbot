@@ -17,28 +17,69 @@ table = dynamodb.Table(TABLE_NAME)
  
  
 def fetch_all_courses():
+
     """Fetch every course from umd.io, paginating through results."""
+
     courses = []
+
     page = 1
+
     per_page = 100
  
     while True:
+
         url = f'{UMDIO_BASE}/courses'
+
         params = {'semester': SEMESTER, 'page': page, 'per_page': per_page}
+
         print(f'Fetching page {page}...')
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        batch = response.json()
+ 
+        # Retry up to 3 times on network hiccups
+
+        for attempt in range(3):
+
+            try:
+
+                response = requests.get(url, params=params, timeout=30)
+
+                response.raise_for_status()
+
+                batch = response.json()
+
+                break
+
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+
+                if attempt < 2:
+
+                    print(f'  ⚠ Timeout on page {page}, retrying ({attempt + 1}/3)...')
+
+                    time.sleep(2)
+
+                else:
+
+                    print(f'  ✗ Page {page} failed after 3 attempts, giving up: {e}')
+
+                    return courses  # return what we have so far
+ 
         if not batch:
+
             break
+
         courses.extend(batch)
+
         if len(batch) < per_page:
+
             break
+
         page += 1
-        time.sleep(0.2)  # be polite to umd.io
+
+        time.sleep(0.2)
  
     print(f'Fetched {len(courses)} courses total.')
+
     return courses
+ 
  
  
 def fetch_sections(course_id):
