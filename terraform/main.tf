@@ -156,9 +156,13 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
  
+  # TEMPORARY: loosened for edge-case-tester agent testing against the live
+  # deployed endpoint. Revert to production-safe values (rate_limit = 1,
+  # burst_limit = 5, or whatever we determine is appropriate) once testing
+  # is complete.
   default_route_settings {
-    throttling_rate_limit  = 1   # ~1 req/sec sustained
-    throttling_burst_limit = 5   # allows brief bursts up to 5
+    throttling_rate_limit  = 10  # ~10 req/sec sustained
+    throttling_burst_limit = 25  # allows brief bursts up to 25
   }
 }
 
