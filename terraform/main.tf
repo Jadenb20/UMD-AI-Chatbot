@@ -13,6 +13,8 @@ provider "aws" {
   region = "us-east-1"
 }
 
+data "aws_caller_identity" "current" {}
+
 resource "aws_s3_bucket" "frontend" {
   bucket = "umd-chatbot-frontend-${random_id.suffix.hex}"
 }
@@ -52,10 +54,16 @@ resource "aws_iam_role_policy" "lambda_bedrock" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "InvokeBedrock"
-        Effect   = "Allow"
-        Action   = ["bedrock:GetModel", "bedrock:InvokeModel"]
-        Resource = "*"
+        Sid    = "InvokeBedrock"
+        Effect = "Allow"
+        Action = ["bedrock:GetFoundationModel", "bedrock:InvokeModel"]
+        Resource = [
+          "arn:aws:bedrock:us-east-1:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-sonnet-4-6",
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6*",
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6*",
+          "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6*",
+          "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1"
+        ]
       },
       {
         Sid    = "AllowMarketplaceSubscribe"
@@ -215,21 +223,32 @@ resource "aws_opensearchserverless_security_policy" "network" {
 resource "aws_opensearchserverless_access_policy" "data_access" {
   name = "umd-chatbot-access"
   type = "data"
-  policy = jsonencode([{
-    Rules = [{
-      ResourceType = "collection"
-      Resource     = ["collection/umd-chatbot-knowledge"]
-      Permission   = ["aoss:*"]
-    }, {
-      ResourceType = "index"
-      Resource     = ["index/umd-chatbot-knowledge/*"]
-      Permission   = ["aoss:*"]
-    }]
-    Principal = [
-      aws_iam_role.lambda_exec.arn,
-      "arn:aws:iam::301394199680:user/jaden-admin"
-    ]
-  }])
+  policy = jsonencode([
+    {
+      Rules = [{
+        ResourceType = "collection"
+        Resource     = ["collection/umd-chatbot-knowledge"]
+        Permission   = ["aoss:DescribeCollectionItems"]
+      }, {
+        ResourceType = "index"
+        Resource     = ["index/umd-chatbot-knowledge/*"]
+        Permission   = ["aoss:ReadDocument", "aoss:DescribeIndex"]
+      }]
+      Principal = [aws_iam_role.lambda_exec.arn]
+    },
+    {
+      Rules = [{
+        ResourceType = "collection"
+        Resource     = ["collection/umd-chatbot-knowledge"]
+        Permission   = ["aoss:*"]
+      }, {
+        ResourceType = "index"
+        Resource     = ["index/umd-chatbot-knowledge/*"]
+        Permission   = ["aoss:*"]
+      }]
+      Principal = ["arn:aws:iam::301394199680:user/jaden-admin"]
+    }
+  ])
 }
  
 resource "aws_opensearchserverless_collection" "knowledge_base" {
