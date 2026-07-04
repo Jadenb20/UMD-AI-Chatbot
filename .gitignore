@@ -4,6 +4,9 @@ backend/lambda/*.dist-info/
 backend/lambda/*.zip
 backend/lambda_deployment.zip
 backend/lambda/*.so
+backend/lambda/*.pyd
+backend/lambda/**/*.pyd
+backend/lambda/*.mypyc.*
  
 # Keep the actual Lambda code tracked
 !backend/lambda/chat.py
