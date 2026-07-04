@@ -428,6 +428,28 @@ def query_courses_by_code(codes):
         except Exception as e:
             print(f"DynamoDB error for {code}: {e}")
     return results
+
+
+def find_professor_schedule(courses, professor_name):
+    """Filter a professor's DynamoDB course sections down to the ones they
+    teach, so professor_info can answer "when is X's class" from the same
+    schedule data course_info uses — PlanetTerp only has ratings/pass rates,
+    never meeting times. Matches on last name since DynamoDB's instructor
+    strings and PlanetTerp's name format aren't guaranteed to line up."""
+    last_name = professor_name.split()[-1].lower()
+    schedule = []
+    for course in courses:
+        course_id = course.get('course_id')
+        for section in course.get('sections', []):
+            instructors = section.get('instructors', [])
+            if not any(last_name in i.lower() for i in instructors):
+                continue
+            for meeting in section.get('meetings', []):
+                schedule.append(
+                    f"{course_id} Section {section.get('section_id')}: "
+                    f"{meeting.get('days', '')} {meeting.get('start_time', '')}-{meeting.get('end_time', '')}"
+                )
+    return schedule
  
  
 def query_courses_by_filters(gen_eds, time_filter, credit_filter):
@@ -620,7 +642,8 @@ def handler(event, context):
             if prof_data:
                 grade_records = fetch_planetterp_grades(name_match_str, None)
                 pass_rate = calculate_pass_rate(grade_records) if grade_records else None
- 
+                schedule = []
+
                 summary_parts = [f"Professor: {name_match_str}"]
                 avg_rating = to_float(prof_data.get('average_rating'))
                 if avg_rating:
@@ -631,9 +654,16 @@ def handler(event, context):
                     summary_parts.append(f"Overall pass rate (C- or higher): {pass_rate}%")
                 if prof_data.get('courses'):
                     summary_parts.append(f"Courses taught: {', '.join(prof_data['courses'][:10])}")
- 
+
+                    # Cross-reference DynamoDB for actual meeting times —
+                    # PlanetTerp only knows which courses they've taught, not when.
+                    dynamo_courses = query_courses_by_code(prof_data['courses'][:10])
+                    schedule = find_professor_schedule(dynamo_courses, name_match_str)
+                    if schedule:
+                        summary_parts.append("Current schedule:\n" + "\n".join(schedule))
+
                 context_text = "Professor data from PlanetTerp:\n" + "\n".join(summary_parts)
-                used_source = "planetterp"
+                used_source = "planetterp+dynamodb" if schedule else "planetterp"
  
     else:  # general
         chunks = search_opensearch(user_message)
