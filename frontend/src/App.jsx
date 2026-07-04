@@ -29,9 +29,11 @@ function App() {
     setLoading(true)
    
     try {
-      // Build the history Lambda expects — just role + content, no extra metadata
+      // Build the history Lambda expects — just role + content, no extra metadata.
+      // Client-side error bubbles are excluded so a transient fetch failure
+      // doesn't get treated as a real assistant reply on the next request.
       const history = newMessages
-        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .filter(m => (m.role === 'user' || m.role === 'assistant') && !m.isError)
         .map(m => ({ role: m.role, content: m.content }))
    
       const response = await fetch(API_URL, {
