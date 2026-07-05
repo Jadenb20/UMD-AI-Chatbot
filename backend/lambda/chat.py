@@ -511,7 +511,10 @@ def query_courses_by_filters(gen_eds, time_filter, credit_filter):
         filter_expression = ge_filter
  
     if credit_filter is not None:
-        credit_attr = Attr('credits').eq(credit_filter)
+        # 'credits' is stored as a string in DynamoDB (umd.io allows non-numeric
+        # values like credit ranges, e.g. "1-4"), so compare against a string —
+        # a Number filter value never matches a String-typed attribute.
+        credit_attr = Attr('credits').eq(str(credit_filter))
         filter_expression = credit_attr if filter_expression is None else filter_expression & credit_attr
  
     if filter_expression is None:

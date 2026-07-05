@@ -81,8 +81,8 @@ function App() {
   }
  
   const suggestedPrompts = [
-    'What humanities classes are 3 credits?',
-    'Is Dave Mount a good professor?',
+    'What humanities classes are offered?',
+    'Is David Mount a good professor?',
     'How do I apply to UMD?',
     'Tell me about CMSC131',
   ]
