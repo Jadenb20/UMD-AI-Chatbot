@@ -7,13 +7,15 @@ import time
 REGION = 'us-east-1'
 SEMESTER = '202608'  # Fall 2026 — adjust as needed
 TABLE_NAME = 'umd-chatbot-courses'
- 
+INSTRUCTOR_INDEX_TABLE_NAME = 'umd-chatbot-instructor-index'
+
 # umd.io endpoints
 UMDIO_BASE = 'https://api.umd.io/v1'
- 
+
 # DynamoDB client
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
+instructor_index_table = dynamodb.Table(INSTRUCTOR_INDEX_TABLE_NAME)
  
  
 def fetch_all_courses():
@@ -151,24 +153,55 @@ def load_to_dynamodb(items):
             if (i + 1) % 50 == 0:
                 print(f'  Loaded {i + 1} courses...')
     print(f'Done! Loaded {len(items)} courses into DynamoDB.')
- 
- 
+
+
+def normalize_instructor_name(name):
+    return name.strip().lower()
+
+
+def build_instructor_index_items(items):
+    """Flatten each course's sections[].instructors[] into one
+    (instructor_name, course_id) pair per instructor per course, so the
+    instructor-index table stays in sync with what was just loaded above."""
+    seen = set()
+    index_items = []
+    for course in items:
+        course_id = course.get('course_id')
+        for section in course.get('sections', []):
+            for instructor in section.get('instructors', []):
+                key = (normalize_instructor_name(instructor), course_id)
+                if key not in seen:
+                    seen.add(key)
+                    index_items.append({'instructor_name': key[0], 'course_id': key[1]})
+    return index_items
+
+
+def load_instructor_index_to_dynamodb(index_items):
+    with instructor_index_table.batch_writer() as batch:
+        for i, item in enumerate(index_items):
+            batch.put_item(Item=item)
+            if (i + 1) % 50 == 0:
+                print(f'  Loaded {i + 1} instructor-index rows...')
+    print(f'Done! Loaded {len(index_items)} instructor-index rows into DynamoDB.')
+
+
 def main():
     courses = fetch_all_courses()
     items = []
- 
+
     for i, course in enumerate(courses):
         sections = fetch_sections(course['course_id'])
         if not sections:
             continue  # skip courses not actually offered this semester
         item = build_course_item(course, sections)
         items.append(item)
- 
+
         if (i + 1) % 25 == 0:
             print(f'  Processed {i + 1}/{len(courses)} courses (with sections)...')
         time.sleep(0.1)  # rate-limit politeness
- 
+
     load_to_dynamodb(items)
+    load_instructor_index_to_dynamodb(build_instructor_index_items(items))
  
  
 if __name__ == '__main__':

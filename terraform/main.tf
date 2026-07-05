@@ -91,6 +91,12 @@ resource "aws_iam_role_policy" "lambda_bedrock" {
         Effect   = "Allow"
         Action   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
         Resource = aws_dynamodb_table.courses.arn
+      },
+      {
+        Sid      = "ReadInstructorIndexTable"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = aws_dynamodb_table.instructor_index.arn
       }
     ]
   })
@@ -285,19 +291,49 @@ resource "aws_dynamodb_table" "courses" {
   name         = "umd-chatbot-courses"
   billing_mode = "PAY_PER_REQUEST"  # No idle cost, pay per query
   hash_key     = "course_id"
- 
+
   attribute {
     name = "course_id"
     type = "S"
   }
- 
+
   # Tag for easy identification
   tags = {
     Project = "umd-chatbot"
   }
 }
- 
+
 output "courses_table_name" {
   value = aws_dynamodb_table.courses.name
+}
+
+# Lookup table for "which courses does this professor teach" queries.
+# The courses table can't answer this directly — instructor names live inside
+# a nested sections[].instructors[] list, which DynamoDB can't build a GSI on.
+# This table is a flat (instructor_name, course_id) pair per row instead, kept
+# in sync by index_courses.py / backfill_instructor_index.py.
+resource "aws_dynamodb_table" "instructor_index" {
+  name         = "umd-chatbot-instructor-index"
+  billing_mode = "PAY_PER_REQUEST"  # No idle cost, pay per query
+  hash_key     = "instructor_name"
+  range_key    = "course_id"
+
+  attribute {
+    name = "instructor_name"  # normalized (trimmed, lowercased) for lookup consistency
+    type = "S"
+  }
+
+  attribute {
+    name = "course_id"
+    type = "S"
+  }
+
+  tags = {
+    Project = "umd-chatbot"
+  }
+}
+
+output "instructor_index_table_name" {
+  value = aws_dynamodb_table.instructor_index.name
 }
 

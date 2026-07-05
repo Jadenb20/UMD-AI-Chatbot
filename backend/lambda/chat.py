@@ -6,7 +6,7 @@ import requests
 import time
 from concurrent.futures import ThreadPoolExecutor
 from botocore.exceptions import ClientError
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
 from opensearchpy import OpenSearch, RequestsHttpConnection, AWSV4SignerAuth
 
 # Configuration
@@ -14,6 +14,7 @@ REGION = 'us-east-1'
 OPENSEARCH_ENDPOINT = os.environ['OPENSEARCH_ENDPOINT']
 INDEX_NAME = 'umd-knowledge'
 COURSES_TABLE = 'umd-chatbot-courses'
+INSTRUCTOR_INDEX_TABLE = 'umd-chatbot-instructor-index'
 PLANETTERP_BASE = 'https://api.planetterp.com/v1'
 TOP_K = 3
 MAX_PROFS_TO_ENRICH = 20
@@ -23,6 +24,7 @@ MAX_HISTORY = 20  # cap conversation history so per-request scans stay bounded
 bedrock = boto3.client('bedrock-runtime', region_name=REGION)
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 courses_table = dynamodb.Table(COURSES_TABLE)
+instructor_index_table = dynamodb.Table(INSTRUCTOR_INDEX_TABLE)
 
 # OpenSearch auth (uses Lambda's role automatically).
 # AWSV4SignerAuth re-fetches credentials on each signed request instead of
@@ -90,7 +92,8 @@ def classify_intent(question, history=None):
         "- If a specific course code appears (like CMSC131, ENGL101), OR the question refers to a course from recent conversation, classify as course_info.\n"
         "- 'Who teaches X', 'who has the highest rating', 'best professor for X', 'which prof is easiest' — these are course_info when a course context exists.\n"
         "- Only use professor_info when the question is about ONE named professor and NOT comparing across a course.\n"
-        "- If the question refers to a professor already mentioned in recent conversation (using 'her', 'him', 'they', 'their class'), classify as professor_info — this includes 'what time do they/she/he teach', even though it mentions time.\n\n"
+        "- If the question refers to a professor already mentioned in recent conversation (using 'her', 'him', 'they', 'their class'), classify as professor_info — this includes 'what time do they/she/he teach', even though it mentions time.\n"
+        "- 'Who is <Full Name>?' about a specific named person is professor_info, not general — even with no other context in the conversation.\n\n"
         "Valid category names (choose exactly one):\n"
         "course_search — filtering courses by NEW criteria (gen-eds, credits, meeting days/times) with no specific course code and no professor already under discussion\n"
         "course_info — about a specific course code OR ranking/comparing profs of a course\n"
@@ -439,6 +442,22 @@ def query_courses_by_code(codes):
     return results
 
 
+def find_courses_by_instructor_name(name):
+    """Look up which courses a professor teaches via the instructor-index
+    table — used when no course code is available from PlanetTerp, the
+    current message, or history (a "cold" professor query). The main
+    courses table can't answer this directly since instructor names live
+    inside a nested sections[].instructors[] list, not a queryable key."""
+    try:
+        response = instructor_index_table.query(
+            KeyConditionExpression=Key('instructor_name').eq(name.strip().lower())
+        )
+        return [item['course_id'] for item in response.get('Items', [])]
+    except Exception as e:
+        print(f"DynamoDB error looking up instructor {name}: {e}")
+        return []
+
+
 def find_professor_schedule(courses, professor_name):
     """Filter a professor's DynamoDB course sections down to the ones they
     teach, so professor_info can answer "when is X's class" from the same
@@ -674,6 +693,14 @@ def handler(event, context):
                 planetterp_courses + extract_course_codes(user_message) + ([historical_code] if historical_code else [])
             ))
 
+            # Cold lookup — no course code available from PlanetTerp, the
+            # message, or history. Fall back to the instructor-index table
+            # so a standalone "is <name> good?" question isn't left with
+            # nothing just because PlanetTerp missed and no course was
+            # already in context.
+            if not candidate_codes:
+                candidate_codes = find_courses_by_instructor_name(name_match_str)
+
             schedule = []
             if candidate_codes:
                 if planetterp_courses:
@@ -686,6 +713,20 @@ def handler(event, context):
             if prof_data or schedule:
                 context_text = "Professor data:\n" + "\n".join(summary_parts)
                 used_source = "planetterp+dynamodb" if (prof_data and schedule) else ("planetterp" if prof_data else "dynamodb")
+            else:
+                # Give the model an honest, professor_info-specific note instead of
+                # falling through to the generic OpenSearch cascade below — that
+                # cascade has no professor data and tends to assert the person
+                # "doesn't exist," but a failed lookup (no course code in context
+                # to fall back on, or a transient PlanetTerp miss) isn't the same
+                # as confirmed absence.
+                context_text = (
+                    f"No PlanetTerp or course-schedule data could be retrieved for "
+                    f"\"{name_match_str}\" right now. This does not necessarily mean "
+                    f"they don't teach at UMD — it may be a temporary lookup issue or "
+                    f"a name-matching mismatch."
+                )
+                used_source = "none (professor lookup failed)"
  
     else:  # general
         chunks = search_opensearch(user_message)
