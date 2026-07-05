@@ -378,15 +378,34 @@ def _match_titled_name(text):
     return f"{first} {last}" if last else first
 
 
+# Sentence-initial words that are capitalized only because they start a
+# question, not because they're part of a name — without this, "Is Michael
+# Ross a good professor?" matches "Is Michael" instead of "Michael Ross",
+# since both are equally "a capitalized word followed by a capitalized word."
+NON_NAME_LEADING_WORDS = {
+    'is', 'are', 'was', 'were', 'does', 'did', 'do', 'can', 'could',
+    'will', 'would', 'should', 'has', 'have', 'had', 'tell', 'what',
+    'who', 'when', 'where', 'why', 'how'
+}
+
+
 def _match_bare_two_word_name(text):
     """Match a bare "First [Middle-Initial] Last" pair, tolerating a middle
     initial like "A." that would otherwise break the two-token match. A
     single capitalized word is too ambiguous to accept without a title
-    (e.g. "Denton" could be a dorm, not a person), so both parts are required."""
-    match = re.search(rf'\b({NAME_PART})(?:\s+[A-Z]\.?)?\s+({NAME_PART})\b', text)
-    if not match:
-        return None
-    return f"{match.group(1)} {match.group(2)}"
+    (e.g. "Denton" could be a dorm, not a person), so both parts are required.
+    If the first word is a common sentence-starter, retry from the second
+    word instead — it may be the actual start of a real name."""
+    pattern = re.compile(rf'\b({NAME_PART})(?:\s+[A-Z]\.?)?\s+({NAME_PART})\b')
+    pos = 0
+    while True:
+        match = pattern.search(text, pos)
+        if not match:
+            return None
+        if match.group(1).lower() in NON_NAME_LEADING_WORDS:
+            pos = match.start(2)
+            continue
+        return f"{match.group(1)} {match.group(2)}"
 
 
 def find_professor_name_in_history(history):
