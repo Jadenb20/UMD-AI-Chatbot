@@ -1,3 +1,4 @@
+import difflib
 import json
 import boto3
 import os
@@ -77,9 +78,14 @@ def classify_intent(question, history=None):
  
     context_blurb = ""
     if history:
-        recent = history[-4:] if len(history) > 4 else history
+        # Use the full available history (already capped upstream at
+        # MAX_HISTORY) — previously this only looked at the last 4 messages,
+        # so a pronoun referring to something mentioned earlier than that got
+        # misclassified as "general" even though find_professor_name_in_history
+        # and find_course_code_in_history scan the whole window and could have
+        # resolved it.
         context_blurb = "Recent conversation:\n"
-        for msg in recent:
+        for msg in history:
             role = msg.get('role', '')
             content = msg.get('content', '')
             content = content[:200] if isinstance(content, str) else ''
@@ -193,10 +199,23 @@ def _get_with_retry(url, params, timeout=5, retries=2):
     return None
 
 
+def _safe_json(response):
+    """response.json() raises if PlanetTerp ever returns a 200 with a
+    non-JSON body (e.g. a maintenance page) — treat that as no data instead
+    of letting it crash the request."""
+    if not response:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        print(f"PlanetTerp returned a non-JSON body for {response.url}")
+        return None
+
+
 def _try_planetterp_professor(name):
     """One-shot lookup, returns None on 404, rate-limit exhaustion, or error."""
     response = _get_with_retry(f'{PLANETTERP_BASE}/professor', {'name': name, 'reviews': 'false'})
-    return response.json() if response else None
+    return _safe_json(response)
  
  
 def fetch_planetterp_professor(name):
@@ -242,13 +261,13 @@ def fetch_planetterp_grades(professor_name, course_id):
     if course_id:
         params['course'] = course_id
     response = _get_with_retry(f'{PLANETTERP_BASE}/grades', params)
-    return response.json() if response else None
+    return _safe_json(response)
  
  
 def calculate_pass_rate(grade_records):
     """From a list of grade records, calculate % of students who got C- or higher
     (or Satisfactory, for Pass/Fail-graded sections)."""
-    if not grade_records:
+    if not grade_records or not isinstance(grade_records, list):
         return None
 
     total_students = 0
@@ -408,6 +427,62 @@ def _match_bare_two_word_name(text):
         return f"{match.group(1)} {match.group(2)}"
 
 
+# Common English nickname -> formal first name, for professors referred to
+# by a nickname that isn't a substring of the real name (e.g. "Jake" is not
+# a substring of "Jacob", so the fuzzy instructor-index scan can't catch it).
+# Not exhaustive — covers frequently-seen cases, not every possible nickname.
+NICKNAME_TO_FULL_NAME = {
+    'jake': 'jacob', 'jack': 'john', 'johnny': 'john',
+    'mike': 'michael', 'mickey': 'michael',
+    'bob': 'robert', 'bobby': 'robert', 'rob': 'robert', 'robby': 'robert',
+    'bill': 'william', 'billy': 'william', 'liam': 'william',
+    'dave': 'david', 'davey': 'david',
+    'dan': 'daniel', 'danny': 'daniel',
+    'jim': 'james', 'jimmy': 'james',
+    'joe': 'joseph', 'joey': 'joseph',
+    'tom': 'thomas', 'tommy': 'thomas',
+    'chris': 'christopher',
+    'nick': 'nicholas', 'nicky': 'nicholas',
+    'matt': 'matthew',
+    'sam': 'samuel',
+    'alex': 'alexander',
+    'andy': 'andrew', 'drew': 'andrew',
+    'ben': 'benjamin', 'benny': 'benjamin',
+    'ken': 'kenneth', 'kenny': 'kenneth',
+    'ted': 'theodore', 'ned': 'theodore',
+    'ed': 'edward', 'eddie': 'edward',
+    'steve': 'steven',
+    'greg': 'gregory',
+    'rick': 'richard', 'ricky': 'richard', 'rich': 'richard', 'dick': 'richard',
+    'ron': 'ronald', 'ronnie': 'ronald',
+    'tony': 'anthony',
+    'pete': 'peter',
+    'larry': 'lawrence',
+    'kate': 'katherine', 'katie': 'katherine', 'kathy': 'katherine', 'cathy': 'catherine',
+    'peggy': 'margaret', 'maggie': 'margaret', 'meg': 'margaret',
+    'sue': 'susan', 'susie': 'susan',
+    'jen': 'jennifer', 'jenny': 'jennifer',
+    'debbie': 'deborah', 'deb': 'deborah',
+    'patty': 'patricia', 'trish': 'patricia',
+    'molly': 'mary', 'polly': 'mary',
+}
+
+
+def expand_nickname(name):
+    """Swap a recognized nickname for its formal first name (e.g. "Jake
+    Coutts" -> "Jacob Coutts"), so a professor known by a common nickname can
+    still be found. Only replaces the first word, and only when it's in
+    NICKNAME_TO_FULL_NAME — returns None otherwise, leaving the original
+    name untouched."""
+    parts = name.split()
+    if not parts:
+        return None
+    formal_first = NICKNAME_TO_FULL_NAME.get(parts[0].lower())
+    if not formal_first:
+        return None
+    return ' '.join([formal_first.capitalize()] + parts[1:])
+
+
 def find_professor_name_in_history(history):
     """Scan recent messages backwards for a professor name. A name explicitly
     labeled with Dr./Professor is preferred over a bare two-word capitalized
@@ -477,6 +552,62 @@ def find_courses_by_instructor_name(name):
         return []
 
 
+def find_instructor_name_by_partial(name):
+    """Bounded scan against the instructor-index table — only reached when
+    exact PlanetTerp and DynamoDB lookups have already missed. Matches if
+    every word in `name` appears as a substring somewhere in a stored
+    instructor name, so a last-name-only or partial-name reference (e.g.
+    "Coutts" or "Jacob Cou") can resolve to the real full name. A misspelled
+    name or nickname still won't match here, since neither is a substring of
+    the real name. If more than one distinct instructor matches, this backs
+    off and returns nothing rather than guessing which one was meant."""
+    tokens = [t.lower() for t in name.split() if len(t) > 1]
+    if not tokens:
+        return None
+
+    filter_expr = Attr('instructor_name').contains(tokens[0])
+    for t in tokens[1:]:
+        filter_expr = filter_expr & Attr('instructor_name').contains(t)
+
+    try:
+        response = instructor_index_table.scan(
+            FilterExpression=filter_expr,
+            ProjectionExpression='instructor_name',
+            Limit=1000
+        )
+        matches = {item['instructor_name'] for item in response.get('Items', [])}
+    except Exception as e:
+        print(f"DynamoDB error fuzzy-matching instructor {name}: {e}")
+        return None
+
+    if len(matches) == 1:
+        return matches.pop().title()
+    if len(matches) > 1:
+        print(f"Ambiguous fuzzy match for '{name}': {matches}")
+    return None
+
+
+def find_instructor_name_by_misspelling(name, cutoff=0.8):
+    """Last-resort fallback for a genuine misspelling (e.g. "Jacob Couts" for
+    "Jacob Coutts") that isn't a substring of the real name, so
+    find_instructor_name_by_partial can't catch it either. Compares against
+    every distinct instructor name by string similarity and only accepts the
+    closest match if it scores at or above `cutoff`, to avoid guessing on an
+    unrelated name."""
+    try:
+        response = instructor_index_table.scan(
+            ProjectionExpression='instructor_name',
+            Limit=2000
+        )
+        all_names = {item['instructor_name'] for item in response.get('Items', [])}
+    except Exception as e:
+        print(f"DynamoDB error misspelling-matching instructor {name}: {e}")
+        return None
+
+    close = difflib.get_close_matches(name.strip().lower(), all_names, n=1, cutoff=cutoff)
+    return close[0].title() if close else None
+
+
 def find_professor_schedule(courses, professor_name):
     """Filter a professor's DynamoDB course sections down to the ones they
     teach, so professor_info can answer "when is X's class" from the same
@@ -491,7 +622,12 @@ def find_professor_schedule(courses, professor_name):
         course_id = course.get('course_id')
         for section in course.get('sections', []):
             instructors = section.get('instructors', [])
-            if not any(all(part in i.lower() for part in name_parts) for i in instructors):
+            # Word-boundary match, not substring — otherwise "ed" would match
+            # inside "fred", misattributing one professor's schedule to another.
+            if not any(
+                all(re.search(rf'\b{re.escape(part)}\b', i.lower()) for part in name_parts)
+                for i in instructors
+            ):
                 continue
             for meeting in section.get('meetings', []):
                 schedule.append(
@@ -629,6 +765,10 @@ def handler(event, context):
         }
     user_message = body.get('message', '')
     history = body.get('history', []) or []
+    # A malformed history (not a list of message objects) would otherwise
+    # crash later when helpers call msg.get(...) on a non-dict item.
+    if not isinstance(history, list) or not all(isinstance(m, dict) for m in history):
+        history = []
     history = history[-MAX_HISTORY:] if len(history) > MAX_HISTORY else history
 
     if len(user_message) > 200:
@@ -682,7 +822,14 @@ def handler(event, context):
  
     elif intent == 'professor_info':
         name_match_str = _match_titled_name(user_message) or _match_bare_two_word_name(user_message)
- 
+
+        # Fallback: retry against a title-cased copy. Both name regexes
+        # require a capital followed by lowercase letters, so an ALL-CAPS
+        # message (e.g. "IS DAVID MOUNT GOOD") never matches as typed.
+        if not name_match_str:
+            titled_message = user_message.title()
+            name_match_str = _match_titled_name(titled_message) or _match_bare_two_word_name(titled_message)
+
         # Fallback: check history
         if not name_match_str:
             name_match_str = find_professor_name_in_history(history)
@@ -691,6 +838,42 @@ def handler(event, context):
  
         if name_match_str:
             prof_data = fetch_planetterp_professor(name_match_str)
+            exact_courses = find_courses_by_instructor_name(name_match_str)
+
+            # Both exact lookups missed — try a nickname expansion (e.g.
+            # "Jake" -> "Jacob") before the fuzzy scan, since a nickname
+            # substitution is a more precise guess than a substring match.
+            if not prof_data and not exact_courses:
+                expanded_name = expand_nickname(name_match_str)
+                if expanded_name:
+                    expanded_prof_data = fetch_planetterp_professor(expanded_name)
+                    expanded_courses = find_courses_by_instructor_name(expanded_name)
+                    if expanded_prof_data or expanded_courses:
+                        print(f"Resolved '{name_match_str}' to '{expanded_name}' via nickname expansion")
+                        name_match_str = expanded_name
+                        prof_data = expanded_prof_data
+                        exact_courses = expanded_courses
+
+            # Still nothing — try the bounded fuzzy scan to recover the real
+            # full name before giving up.
+            if not prof_data and not exact_courses:
+                resolved_name = find_instructor_name_by_partial(name_match_str)
+                if resolved_name:
+                    print(f"Resolved '{name_match_str}' to '{resolved_name}' via fuzzy instructor-index match")
+                    name_match_str = resolved_name
+                    prof_data = fetch_planetterp_professor(name_match_str)
+                    exact_courses = find_courses_by_instructor_name(name_match_str)
+
+            # Still nothing — last resort for a genuine misspelling that
+            # isn't a substring match either (e.g. "Couts" vs "Coutts").
+            if not prof_data and not exact_courses:
+                resolved_name = find_instructor_name_by_misspelling(name_match_str)
+                if resolved_name:
+                    print(f"Resolved '{name_match_str}' to '{resolved_name}' via misspelling match")
+                    name_match_str = resolved_name
+                    prof_data = fetch_planetterp_professor(name_match_str)
+                    exact_courses = find_courses_by_instructor_name(name_match_str)
+
             grade_records = fetch_planetterp_grades(name_match_str, None) if prof_data else None
             pass_rate = calculate_pass_rate(grade_records) if grade_records else None
 
@@ -711,17 +894,15 @@ def handler(event, context):
             # variant) would have their DynamoDB schedule hidden for no reason.
             planetterp_courses = prof_data.get('courses', [])[:10] if prof_data else []
             historical_code = find_course_code_in_history(history)
+            # Always include the instructor-index table's current-semester
+            # courses (already fetched above as exact_courses), not just as a
+            # last resort — PlanetTerp's course list is historical and can be
+            # missing courses the professor teaches this semester, so relying
+            # on it alone silently drops real schedule data.
             candidate_codes = list(dict.fromkeys(
-                planetterp_courses + extract_course_codes(user_message) + ([historical_code] if historical_code else [])
+                planetterp_courses + extract_course_codes(user_message) +
+                ([historical_code] if historical_code else []) + exact_courses
             ))
-
-            # Cold lookup — no course code available from PlanetTerp, the
-            # message, or history. Fall back to the instructor-index table
-            # so a standalone "is <name> good?" question isn't left with
-            # nothing just because PlanetTerp missed and no course was
-            # already in context.
-            if not candidate_codes:
-                candidate_codes = find_courses_by_instructor_name(name_match_str)
 
             schedule = []
             if candidate_codes:
