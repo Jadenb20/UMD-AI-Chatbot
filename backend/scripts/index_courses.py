@@ -135,7 +135,8 @@ def build_course_item(course, sections):
                     'start_time': m.get('start_time', ''),
                     'end_time': m.get('end_time', ''),
                     'room': m.get('room', ''),
-                    'building': m.get('building', '')
+                    'building': m.get('building', ''),
+                    'classtype': m.get('classtype', '')
                 }
                 for m in s.get('meetings', [])
             ]

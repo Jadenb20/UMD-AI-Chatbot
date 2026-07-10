@@ -361,7 +361,56 @@ GEN_ED_MAP = {
     'i-series': 'SCIS',
     'big questions': 'SCIS',
 }
- 
+
+# Every UMD department code, straight from umd.io's /courses/departments
+# endpoint. Used to confirm a bare word from the question (e.g. "psyc") is
+# really a department and not an ordinary English word that happens to be
+# 3-4 letters long (e.g. "labs").
+DEPT_CODES = {
+    'AAAS', 'AAPS', 'AASP', 'AAST', 'ABRM', 'AGNR', 'AGST', 'AMSC', 'AMST', 'ANSC',
+    'ANTH', 'AOSC', 'ARAB', 'ARCH', 'AREC', 'ARHU', 'ARMY', 'ARSC', 'ARTH', 'ARTT',
+    'ASTR', 'BCHM', 'BDBA', 'BEES', 'BIOE', 'BIOI', 'BIOL', 'BIOM', 'BIPH', 'BISI',
+    'BMGT', 'BMIN', 'BMSO', 'BOIS', 'BSCI', 'BSCV', 'BSGC', 'BSOS', 'BSST', 'BUAC',
+    'BUDT', 'BUFN', 'BULM', 'BUMK', 'BUMO', 'BUSI', 'BUSM', 'BUSO', 'CBMG', 'CCJS',
+    'CHBE', 'CHEM', 'CHIN', 'CHPH', 'CHSE', 'CINE', 'CLAS', 'CLFS', 'CMLT', 'CMNS',
+    'CMSC', 'COMM', 'CONS', 'CPBE', 'CPCV', 'CPDJ', 'CPET', 'CPGH', 'CPJT', 'CPMS',
+    'CPPL', 'CPSA', 'CPSD', 'CPSF', 'CPSG', 'CPSN', 'CPSP', 'CPSS', 'CRLN', 'DANC',
+    'DATA', 'EALL', 'ECON', 'EDCI', 'EDCP', 'EDDI', 'EDHD', 'EDHI', 'EDMS', 'EDPS',
+    'EDSP', 'EDUC', 'EMBA', 'ENAE', 'ENAI', 'ENBC', 'ENCE', 'ENCH', 'ENCO', 'ENEB',
+    'ENED', 'ENEE', 'ENES', 'ENFP', 'ENGL', 'ENMA', 'ENME', 'ENMT', 'ENNU', 'ENPM',
+    'ENPP', 'ENRE', 'ENSE', 'ENSP', 'ENST', 'ENTE', 'ENTM', 'ENTS', 'ENVH', 'EPIB',
+    'EXST', 'FGSM', 'FILM', 'FIRE', 'FMSC', 'FREN', 'GBHL', 'GEMS', 'GEOG', 'GEOL',
+    'GERM', 'GERS', 'GFPL', 'GLBC', 'GREK', 'GVPT', 'HACS', 'HBUS', 'HDCC', 'HEBR',
+    'HEIP', 'HESI', 'HESP', 'HGLO', 'HHUM', 'HISP', 'HIST', 'HLMN', 'HLSA', 'HLSC',
+    'HLTH', 'HNUH', 'HONR', 'IDEA', 'IMDM', 'IMMR', 'INAG', 'INFM', 'INST', 'ISRL',
+    'ITAL', 'JAPN', 'JOUR', 'JWST', 'KNES', 'KORA', 'LACS', 'LARC', 'LASC', 'LATN',
+    'LBSC', 'LEAD', 'LGBT', 'LING', 'MAIT', 'MATH', 'MEES', 'MIEH', 'MITH', 'MLAW',
+    'MLSC', 'MOCB', 'MSAI', 'MSBB', 'MSMC', 'MSML', 'MSQC', 'MUED', 'MUSC', 'MUSP',
+    'NACS', 'NAVY', 'NEUR', 'NFSC', 'NIAP', 'NIAS', 'NIAV', 'OURS', 'PEER', 'PERS',
+    'PHIL', 'PHPE', 'PHSC', 'PHYS', 'PLCY', 'PLSC', 'PORT', 'PSYC', 'QMMS', 'RDEV',
+    'RELS', 'RUSS', 'SDSB', 'SDSI', 'SLAA', 'SLLC', 'SMLP', 'SOCY', 'SPAN', 'SPHL',
+    'STAT', 'SUMM', 'SURV', 'TDPS', 'THET', 'TLPL', 'TLTC', 'TOXI', 'UGST', 'UMEI',
+    'UNIV', 'URSP', 'USLT', 'VIPS', 'VMSC', 'WEID', 'WGSS', 'WMST', 'XPER',
+}
+
+# Weekday name/abbreviation -> umd.io's single-letter-per-day code (umd.io
+# concatenates these into strings like "MWF" or "TuTh" on each meeting).
+DAY_NAME_MAP = {
+    'monday': 'M', 'mondays': 'M', 'mon': 'M',
+    'tuesday': 'Tu', 'tuesdays': 'Tu', 'tues': 'Tu', 'tue': 'Tu',
+    'wednesday': 'W', 'wednesdays': 'W', 'wed': 'W',
+    'thursday': 'Th', 'thursdays': 'Th', 'thurs': 'Th', 'thu': 'Th',
+    'friday': 'F', 'fridays': 'F', 'fri': 'F',
+}
+
+# Keyword -> umd.io's 'classtype' value for a meeting. umd.io leaves
+# classtype as an empty string for an ordinary lecture meeting, so there's
+# no keyword mapped to that case here.
+CLASSTYPE_KEYWORDS = {
+    'lab': 'Lab', 'labs': 'Lab', 'laboratory': 'Lab',
+    'discussion': 'Discussion', 'discussions': 'Discussion',
+}
+
  
 def extract_course_codes(question):
     """Extract course codes like CMSC131, ENGL101, PHIL220 — case-insensitive.
@@ -388,6 +437,44 @@ def extract_time(question):
 def extract_credits(question):
     match = re.search(r'\b(\d)\s*[- ]?credit', question.lower())
     return int(match.group(1)) if match else None
+
+
+def extract_department(question):
+    """Extract a UMD department code (e.g. 'PSYC') mentioned by name. Only
+    matches words that are real department codes, so an ordinary 3-4 letter
+    word (e.g. "labs") isn't mistaken for one."""
+    for word in re.findall(r'\b[A-Za-z]{3,4}\b', question):
+        if word.upper() in DEPT_CODES:
+            return word.upper()
+    return None
+
+
+def extract_course_level(question):
+    """Extract a course level like '400' from phrases such as '400 level' or
+    '400-level'. Returns just the leading digit (e.g. '4'), since that's what
+    a course_id's course number (e.g. the '4' in 'PSYC402') is checked against."""
+    match = re.search(r'\b([1-8])00[\s-]*level\b', question.lower())
+    return match.group(1) if match else None
+
+
+def extract_days(question):
+    """Extract UMD meeting-day codes (e.g. ['Tu', 'Th']) mentioned by
+    weekday name. Returned in Monday-Friday order regardless of the order
+    they were mentioned in, so downstream comparisons are consistent."""
+    q_lower = question.lower()
+    order = ['M', 'Tu', 'W', 'Th', 'F']
+    found = {code for name, code in DAY_NAME_MAP.items() if re.search(rf'\b{name}\b', q_lower)}
+    return [d for d in order if d in found]
+
+
+def extract_classtype(question):
+    """Extract the meeting classtype ('Lab' or 'Discussion') implied by
+    keywords like "lab" or "discussion" in the question."""
+    q_lower = question.lower()
+    for keyword, classtype in CLASSTYPE_KEYWORDS.items():
+        if re.search(rf'\b{keyword}\b', q_lower):
+            return classtype
+    return None
 
 
 NAME_PART = r"[A-Z][a-z]+(?:['-][A-Za-z]+)*|[A-Z](?:['-][A-Za-z]+)+"  # supports Smith-Jones and O'Brien/D'Angelo (apostrophe right after the first letter)
@@ -698,29 +785,57 @@ def find_professor_schedule(courses, professor_name):
     return schedule
  
  
-def query_courses_by_filters(gen_eds, time_filter, credit_filter):
+def _tokenize_days(days_str):
+    """Split a concatenated umd.io days string (e.g. 'TuTh') into its
+    individual day codes (['Tu', 'Th'])."""
+    return re.findall(r'Tu|Th|M|W|F', days_str or '')
+
+
+def _meeting_matches(meeting, days, classtype):
+    """Check a single meeting against the requested days/classtype, so a
+    match requires one meeting to satisfy both together — e.g. a course
+    whose lecture meets MWF and whose lab meets Tu should only match a
+    "labs that meet Tuesday" search because of the lab meeting, not because
+    the course has some meeting somewhere that's on a Tuesday."""
+    if classtype and meeting.get('classtype', '').lower() != classtype.lower():
+        return False
+    if days:
+        meeting_days = set(_tokenize_days(meeting.get('days', '')))
+        if not meeting_days or not meeting_days <= set(days):
+            return False
+    return True
+
+
+def query_courses_by_filters(gen_eds, time_filter, credit_filter, dept=None, level=None, days=None, classtype=None):
     filter_expression = None
- 
+
     if gen_eds:
         ge_filter = Attr('gen_ed').contains(gen_eds[0])
         for ge in gen_eds[1:]:
             ge_filter = ge_filter | Attr('gen_ed').contains(ge)
         filter_expression = ge_filter
- 
+
     if credit_filter is not None:
         # 'credits' is stored as a string in DynamoDB (umd.io allows non-numeric
         # values like credit ranges, e.g. "1-4"), so compare against a string —
         # a Number filter value never matches a String-typed attribute.
         credit_attr = Attr('credits').eq(str(credit_filter))
         filter_expression = credit_attr if filter_expression is None else filter_expression & credit_attr
- 
-    if filter_expression is None:
+
+    if dept:
+        dept_attr = Attr('dept_id').eq(dept)
+        filter_expression = dept_attr if filter_expression is None else filter_expression & dept_attr
+
+    # Nothing to search for at all — bail out before hitting DynamoDB.
+    if filter_expression is None and not (level or days or classtype):
         return []
 
     # Scan's Limit caps items evaluated per page, not items returned after
     # filtering — paginate so matches beyond the first page aren't missed.
     items = []
-    scan_kwargs = {'FilterExpression': filter_expression, 'Limit': 300}
+    scan_kwargs = {'Limit': 300}
+    if filter_expression is not None:
+        scan_kwargs['FilterExpression'] = filter_expression
     total_scanned = 0
     while True:
         response = courses_table.scan(**scan_kwargs)
@@ -730,7 +845,12 @@ def query_courses_by_filters(gen_eds, time_filter, credit_filter):
         if not last_key or len(items) >= 10 or total_scanned >= 3000:
             break
         scan_kwargs['ExclusiveStartKey'] = last_key
- 
+
+    if level:
+        # Course numbers are the digits in course_id after the department
+        # prefix (e.g. 'PSYC402' -> '402'); the first digit is the level.
+        items = [c for c in items if re.sub(r'^[A-Za-z]+', '', c.get('course_id', ''))[:1] == level]
+
     if time_filter:
         # Normalize case/whitespace so "2:00pm" matches a stored "2:00 PM".
         normalized_filter = [t.lower().replace(' ', '') for t in time_filter]
@@ -746,7 +866,21 @@ def query_courses_by_filters(gen_eds, time_filter, credit_filter):
                     continue
                 break
         items = filtered
- 
+
+    if days or classtype:
+        # Keep only the sections that actually have a matching meeting —
+        # dropping the rest so format_courses_for_prompt doesn't show the
+        # LLM a course's unrelated lecture section for a "labs" search.
+        filtered = []
+        for course in items:
+            keep_sections = [
+                section for section in course.get('sections', [])
+                if any(_meeting_matches(m, days, classtype) for m in section.get('meetings', []))
+            ]
+            if keep_sections:
+                filtered.append({**course, 'sections': keep_sections})
+        items = filtered
+
     items = [c for c in items if c.get('sections')]
     return items[:10]
  
@@ -789,9 +923,15 @@ def format_courses_for_prompt(courses, enrichments=None):
  
             meetings = s.get('meetings', [])
             if meetings:
-                m = meetings[0]
+                # Show every meeting, not just the first — a section's
+                # lecture and lab/discussion often meet on different days,
+                # and both matter for answering scheduling questions.
+                meeting_strs = [
+                    f"{m.get('classtype') + ' ' if m.get('classtype') else ''}{m.get('days', '')} {m.get('start_time', '')}-{m.get('end_time', '')}"
+                    for m in meetings
+                ]
                 section_info.append(
-                    f"  Section {s.get('section_id')}: {instructor_str}{extras_str} | {m.get('days', '')} {m.get('start_time', '')}-{m.get('end_time', '')}"
+                    f"  Section {s.get('section_id')}: {instructor_str}{extras_str} | {'; '.join(meeting_strs)}"
                 )
         section_text = '\n'.join(section_info) if section_info else '  (no sections offered)'
         lines.append(
@@ -869,7 +1009,11 @@ def handler(event, context):
         gen_eds = extract_gen_eds(user_message)
         times = extract_time(user_message)
         credits = extract_credits(user_message)
-        courses = query_courses_by_filters(gen_eds, times, credits)
+        dept = extract_department(user_message)
+        level = extract_course_level(user_message)
+        days = extract_days(user_message)
+        classtype = extract_classtype(user_message)
+        courses = query_courses_by_filters(gen_eds, times, credits, dept, level, days, classtype)
         if courses:
             if wants_prof_data(user_message):
                 print("Enriching with PlanetTerp data...")
