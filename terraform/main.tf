@@ -95,7 +95,10 @@ resource "aws_iam_role_policy" "lambda_bedrock" {
       {
         Sid      = "ReadInstructorIndexTable"
         Effect   = "Allow"
-        Action   = ["dynamodb:Query"]
+        # Scan is needed by chat.py's name-matching fallbacks (partial names,
+        # misspellings, bare first names) — without it those lookups fail with
+        # AccessDenied and the bot wrongly reports "no data" for the professor.
+        Action   = ["dynamodb:Query", "dynamodb:Scan"]
         Resource = aws_dynamodb_table.instructor_index.arn
       }
     ]
