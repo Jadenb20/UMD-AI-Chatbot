@@ -439,21 +439,45 @@ def extract_credits(question):
     return int(match.group(1)) if match else None
 
 
+# Ordinary English words whose letters happen to rearrange into a real
+# department code (e.g. "this" -> HIST, "need"/"eden" -> ENED, "than" -> ANTH,
+# "name"/"mane"/"amen" -> ENMA, "hits" -> HIST, "scum" -> MUSC). The typo
+# fallback in extract_department must skip these, or everyday questions would
+# sprout phantom department filters.
+DEPT_ANAGRAM_STOPWORDS = {'this', 'hits', 'need', 'eden', 'than', 'name', 'mane', 'amen', 'scum'}
+
+
 def extract_department(question):
     """Extract a UMD department code (e.g. 'PSYC') mentioned by name. Only
     matches words that are real department codes, so an ordinary 3-4 letter
-    word (e.g. "labs") isn't mistaken for one."""
-    for word in re.findall(r'\b[A-Za-z]{3,4}\b', question):
+    word (e.g. "labs") isn't mistaken for one. Falls back to letter-transposition
+    typos ("pysc" -> PSYC): anagram equality is deliberately stricter than fuzzy
+    matching, since "the" is one edit from THET and would misfire, but almost no
+    ordinary word is a perfect anagram of a dept code (the known exceptions live
+    in DEPT_ANAGRAM_STOPWORDS)."""
+    words = re.findall(r'\b[A-Za-z]{3,4}\b', question)
+    for word in words:
         if word.upper() in DEPT_CODES:
             return word.upper()
+    for word in words:
+        if word.lower() in DEPT_ANAGRAM_STOPWORDS:
+            continue
+        letters = sorted(word.upper())
+        # sorted() so ties resolve deterministically, not by set iteration order
+        for code in sorted(DEPT_CODES):
+            if len(code) == len(word) and sorted(code) == letters:
+                return code
     return None
 
 
 def extract_course_level(question):
-    """Extract a course level like '400' from phrases such as '400 level' or
-    '400-level'. Returns just the leading digit (e.g. '4'), since that's what
-    a course_id's course number (e.g. the '4' in 'PSYC402') is checked against."""
-    match = re.search(r'\b([1-8])00[\s-]*level\b', question.lower())
+    """Extract a course level like '400' from phrases such as '400 level',
+    '400-level', or 'level 400'. Returns just the leading digit (e.g. '4'),
+    since that's what a course_id's course number (e.g. the '4' in 'PSYC402')
+    is checked against."""
+    q_lower = question.lower()
+    match = (re.search(r'\b([1-8])00[\s-]*level\b', q_lower)
+             or re.search(r'\blevel[\s-]*([1-8])00\b', q_lower))
     return match.group(1) if match else None
 
 
