@@ -103,7 +103,7 @@ def classify_intent(question, history=None):
     classification_prompt = (
         "Classify the following question into ONE category. Reply with ONLY the category name — no other words, no explanation.\n\n"
         "IMPORTANT RULES:\n"
-        "- If a specific course code appears (like CMSC131, ENGL101), OR the question refers to a course from recent conversation, classify as course_info.\n"
+        "- If a specific course code appears (like CMSC131, ENGL101), OR the question refers to a course from recent conversation, classify as course_info. A bare department name or abbreviation with NO course number attached (like 'PSYC', 'psyc classes', 'psychology courses') is NOT a specific course code — that's course_search.\n"
         "- 'Who teaches X', 'who has the highest rating', 'best professor for X', 'which prof is easiest' — these are course_info when a course context exists.\n"
         "- Only use professor_info when the question is about ONE named professor and NOT comparing across a course.\n"
         "- If the question refers to a professor already mentioned in recent conversation (using 'her', 'him', 'they', 'their class'), classify as professor_info — this includes 'what time do they/she/he teach', even though it mentions time.\n"

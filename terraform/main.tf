@@ -340,3 +340,114 @@ output "instructor_index_table_name" {
   value = aws_dynamodb_table.instructor_index.name
 }
 
+# ─────────────────────────────────────────────────────────────
+# Scheduled course-catalog refresh (backend/scripts/index_courses.py)
+# Runs weekly so seat counts and any mid-semester schedule changes from
+# umd.io stay current. Separate role from the chat Lambda since this one
+# needs to WRITE to the course tables, while chat only ever reads them.
+# ─────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "index_courses_lambda_exec" {
+  name = "umd-chatbot-index-courses-lambda-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "index_courses_dynamodb_write" {
+  name = "write-course-tables"
+  role = aws_iam_role.index_courses_lambda_exec.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "WriteCoursesTable"
+        Effect   = "Allow"
+        Action   = ["dynamodb:BatchWriteItem", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.courses.arn
+      },
+      {
+        Sid      = "WriteInstructorIndexTable"
+        Effect   = "Allow"
+        Action   = ["dynamodb:BatchWriteItem", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.instructor_index.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "index_courses_lambda_logs" {
+  role       = aws_iam_role.index_courses_lambda_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+data "archive_file" "index_courses_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../backend/scripts"
+  output_path = "${path.module}/../backend/index_courses_deployment.zip"
+  excludes    = ["__pycache__"]
+}
+
+resource "aws_lambda_function" "index_courses" {
+  function_name    = "umd-chatbot-index-courses"
+  filename         = data.archive_file.index_courses_zip.output_path
+  source_code_hash = data.archive_file.index_courses_zip.output_base64sha256
+  role             = aws_iam_role.index_courses_lambda_exec.arn
+  handler          = "index_courses.handler"
+  runtime          = "python3.11"
+  timeout          = 900  # Lambda's hard max — headroom for a full catalog refresh
+  memory_size      = 512
+}
+
+resource "aws_iam_role" "index_courses_scheduler" {
+  name = "umd-chatbot-index-courses-scheduler-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "scheduler.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "index_courses_scheduler_invoke" {
+  name = "invoke-index-courses-lambda"
+  role = aws_iam_role.index_courses_scheduler.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "lambda:InvokeFunction"
+      Resource = aws_lambda_function.index_courses.arn
+    }]
+  })
+}
+
+resource "aws_scheduler_schedule" "index_courses_weekly" {
+  name       = "umd-chatbot-index-courses-weekly"
+  group_name = "default"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  schedule_expression = "rate(7 days)"
+
+  target {
+    arn      = aws_lambda_function.index_courses.arn
+    role_arn = aws_iam_role.index_courses_scheduler.arn
+  }
+}
+

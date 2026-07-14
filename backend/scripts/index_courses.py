@@ -2,6 +2,7 @@ import boto3
 import requests
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
  
 # Configuration
 REGION = 'us-east-1'
@@ -189,22 +190,36 @@ def load_instructor_index_to_dynamodb(index_items):
 def main():
     courses = fetch_all_courses()
     items = []
+    completed = 0
 
-    for i, course in enumerate(courses):
-        sections = fetch_sections(course['course_id'])
-        if not sections:
-            continue  # skip courses not actually offered this semester
-        item = build_course_item(course, sections)
-        items.append(item)
-
-        if (i + 1) % 25 == 0:
-            print(f'  Processed {i + 1}/{len(courses)} courses (with sections)...')
-        time.sleep(0.1)  # rate-limit politeness
+    # Section fetches are independent HTTP calls, so run them concurrently
+    # instead of one-at-a-time-with-a-sleep — this is what keeps a full
+    # catalog run comfortably under the 15-minute Lambda timeout for the
+    # scheduled weekly refresh, instead of taking 15-30+ minutes serially.
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_course = {executor.submit(fetch_sections, c['course_id']): c for c in courses}
+        for future in as_completed(future_to_course):
+            course = future_to_course[future]
+            sections = future.result()
+            completed += 1
+            if completed % 25 == 0:
+                print(f'  Processed {completed}/{len(courses)} courses (with sections)...')
+            if not sections:
+                continue  # skip courses not actually offered this semester
+            items.append(build_course_item(course, sections))
 
     load_to_dynamodb(items)
     load_instructor_index_to_dynamodb(build_instructor_index_items(items))
- 
- 
+
+
+def handler(event, context):
+    """Lambda entry point for the scheduled weekly re-index — runs the exact
+    same refresh as `python index_courses.py`, just triggered by EventBridge
+    Scheduler instead of a person."""
+    main()
+    return {'statusCode': 200, 'body': 'Course index refresh complete'}
+
+
 if __name__ == '__main__':
     main()
  

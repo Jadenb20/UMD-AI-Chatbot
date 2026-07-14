@@ -10,7 +10,23 @@ backend/lambda/*.mypyc.*
  
 # Keep the actual Lambda code tracked
 !backend/lambda/chat.py
- 
+
+# Same deal for the index-courses Lambda's dependencies (vendored via
+# pip install --target backend/scripts requests)
+backend/scripts/*/
+backend/scripts/*.dist-info/
+backend/scripts/*.zip
+backend/index_courses_deployment.zip
+backend/scripts/*.so
+backend/scripts/*.pyd
+backend/scripts/**/*.pyd
+backend/scripts/*.mypyc.*
+
+# Keep the actual scripts tracked
+!backend/scripts/index_courses.py
+!backend/scripts/backfill_instructor_index.py
+!backend/scripts/index_documents.py
+
 # Terraform state and cache
 terraform/.terraform/
 terraform/.terraform.lock.hcl
