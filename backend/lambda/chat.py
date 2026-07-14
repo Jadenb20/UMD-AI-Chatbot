@@ -746,19 +746,20 @@ def find_instructor_name_by_misspelling(name, cutoff=0.8):
     """Last-resort fallback for a genuine misspelling (e.g. "Jacob Couts" for
     "Jacob Coutts") that isn't a substring of the real name, so
     find_instructor_name_by_partial can't catch it either. Compares against
-    every distinct instructor name by string similarity and returns the
-    closest match if it scores at or above `cutoff` — the caller treats this
-    as a "did you mean" suggestion to confirm, not an automatic resolution,
-    since two different real instructors can be spelled close enough to
-    each other to collide here."""
+    every distinct instructor name by string similarity and returns up to the
+    two closest matches at or above `cutoff`, as (name, similarity) pairs
+    sorted best-first. The caller uses the scores to decide between adopting
+    a near-certain match outright, asking "did you mean X?", or offering a
+    pick-one list when two real instructors are both plausible corrections."""
     try:
         all_names = _scan_all_instructor_names()
     except Exception as e:
         print(f"DynamoDB error misspelling-matching instructor {name}: {e}")
-        return None
+        return []
 
-    close = difflib.get_close_matches(name.strip().lower(), all_names, n=1, cutoff=cutoff)
-    return close[0].title() if close else None
+    query = name.strip().lower()
+    close = difflib.get_close_matches(query, all_names, n=2, cutoff=cutoff)
+    return [(m.title(), difflib.SequenceMatcher(None, query, m).ratio()) for m in close]
 
 
 def find_instructors_by_first_name(first_name):
@@ -1147,8 +1148,25 @@ def handler(event, context):
             # wrong person's data.
             confirmation_text = None
             if not prof_data and not exact_courses and not disambiguation_text:
-                possible_match = find_instructor_name_by_misspelling(name_match_str)
-                if possible_match:
+                close_matches = find_instructor_name_by_misspelling(name_match_str)
+                if len(close_matches) > 1 and close_matches[1][1] >= 0.9:
+                    # Two real instructors are both plausible corrections —
+                    # silently picking one risks presenting the wrong
+                    # person's data, so offer both.
+                    disambiguation_text = _build_disambiguation_text(name_match_str, [m for m, _ in close_matches])
+                elif close_matches and close_matches[0][1] >= 0.9:
+                    # Near-certain typo of exactly one instructor (e.g.
+                    # "Angel Jonest" -> "Angel Jones") — adopt it and answer.
+                    # Asking "did you mean" here is a dead end: the user's
+                    # "yes" carries no name, so the typo'd one gets
+                    # re-extracted from history and the bot just asks again.
+                    resolved, similarity = close_matches[0]
+                    print(f"Auto-resolved probable typo '{name_match_str}' -> '{resolved}' (similarity {similarity:.2f})")
+                    name_match_str = resolved
+                    prof_data = fetch_planetterp_professor(name_match_str)
+                    exact_courses = find_courses_by_instructor_name(name_match_str)
+                elif close_matches:
+                    possible_match = close_matches[0][0]
                     print(f"Possible misspelling match for '{name_match_str}': '{possible_match}' — asking for confirmation")
                     confirmation_text = (
                         f"I couldn't find an exact match for \"{name_match_str}\". "
