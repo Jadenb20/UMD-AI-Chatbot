@@ -7,6 +7,16 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # Remote state so every machine shares one source of truth (the state
+  # bucket itself is created outside Terraform — chicken-and-egg).
+  # use_lockfile = S3-native locking (Terraform 1.10+), no DynamoDB needed.
+  backend "s3" {
+    bucket       = "umd-chatbot-tfstate-301394199680"
+    key          = "umd-chatbot/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+  }
 }
 
 provider "aws" {

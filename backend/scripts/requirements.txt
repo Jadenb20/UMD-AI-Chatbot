@@ -1,0 +1,3 @@
+# index-courses Lambda dependencies — vendor into this folder before terraform apply:
+#   pip install --target backend/scripts -r backend/scripts/requirements.txt
+requests==2.34.2
